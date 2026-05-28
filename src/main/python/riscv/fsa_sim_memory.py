@@ -26,28 +26,26 @@ class DictMemoryInterface(MemoryInterface):
 
 
 class SimMemoryInterface(MemoryInterface):
-    """Placeholder: requires C++ bindings for pyspike sim_t memory access.
+    """Memory interface backed by pyspike sim_t physical memory.
 
-    The pyspike sim_t object does not currently expose mem_read/mem_write
-    APIs to Python.  Until those bindings are implemented, this class
-    raises RuntimeError on every read/write call.  Use DictMemoryInterface
-    for functional testing.
+    Uses sim_t.read_memory() and sim_t.write_memory() to access the
+    Spike simulator's DRAM. This allows FSA's DMA engine to read/write
+    the same physical memory that the RISC-V CPU accesses.
     """
 
     def __init__(self, sim):
         self.sim = sim
 
     def read(self, addr: int, size: int) -> bytes:
-        raise RuntimeError(
-            "SimMemoryInterface.read: pyspike sim_t does not expose a "
-            "memory read API.  Use DictMemoryInterface for functional testing."
-        )
+        return self.sim.read_memory(addr, size)
 
     def write(self, addr: int, data: bytes) -> None:
-        raise RuntimeError(
-            "SimMemoryInterface.write: pyspike sim_t does not expose a "
-            "memory write API.  Use DictMemoryInterface for functional testing."
-        )
+        ok = self.sim.write_memory(addr, data)
+        if not ok:
+            raise RuntimeError(
+                f"SimMemoryInterface.write: sim_t.write_memory failed for "
+                f"addr=0x{addr:x}, size={len(data)}"
+            )
 
 
 def test_sim_memory():
@@ -58,20 +56,39 @@ def test_sim_memory():
     mem.write(2, b'\xff\xfe')
     assert mem.read(0, 4) == b'\x01\x02\xff\xfe', "DictMemoryInterface overwrite mismatch"
 
-    sim = SimMemoryInterface(sim=None)
-    try:
-        sim.read(0, 4)
-        assert False, "SimMemoryInterface.read should raise RuntimeError"
-    except RuntimeError:
-        pass
-    try:
-        sim.write(0, b'\x00')
-        assert False, "SimMemoryInterface.write should raise RuntimeError"
-    except RuntimeError:
-        pass
+    print("test_sim_memory: DictMemoryInterface all passed")
 
-    print("test_sim_memory: all passed")
+
+def test_sim_memory_with_spike():
+    try:
+        from riscv.sim import sim_t
+        from riscv.cfg import cfg_t, mem_cfg_t
+        from riscv.debug_module import debug_module_config_t
+    except ImportError:
+        print("test_sim_memory_with_spike: skipped (pyspike not available)")
+        return
+
+    cfg = cfg_t(isa='rv64gc', priv='msu',
+                mem_layout=[mem_cfg_t(0x80000000, 0x10000000)])
+    sim = sim_t(cfg=cfg, halted=False,
+                plugin_device_factories=[], args=['tests/data/libc-printf_hello.elf'],
+                dm_config=debug_module_config_t())
+
+    mem = SimMemoryInterface(sim)
+
+    test_data = b'\xde\xad\xbe\xef'
+    mem.write(0x80000000, test_data)
+    readback = mem.read(0x80000000, 4)
+    assert readback == test_data, f"SimMemoryInterface read/write mismatch: {readback.hex()} != {test_data.hex()}"
+
+    cross_data = b'\x11\x22\x33\x44\x55\x66\x77\x88'
+    mem.write(0x80000FFC, cross_data)
+    cross_read = mem.read(0x80000FFC, 8)
+    assert cross_read == cross_data, f"SimMemoryInterface cross-page mismatch: {cross_read.hex()} != {cross_data.hex()}"
+
+    print("test_sim_memory_with_spike: all passed")
 
 
 if __name__ == "__main__":
     test_sim_memory()
+    test_sim_memory_with_spike()
